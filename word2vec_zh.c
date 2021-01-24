@@ -31,14 +31,14 @@
  * 例如，如果哈希表有30M个条目，那么词典的最大大小为21M。
  * 这是为了尽量减少散列碰撞的发生和性能影响。
  */
-const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
+const int vocab_hash_size = 30000000;  // 最多存2000万的单词以保证查找效率
 
-typedef float real;                    // Precision of float numbers
+typedef float real;                    // float 作为浮点数的精度。指数位八位，尾数位23位。
 
 /**
  * ======== 词 ========
  * Properties:
- *   cn - 词频(出现的次数).
+ *   cn - 词频(出现的次数)。
  *   word - 用字符串表示的词。
  */
 struct vocab_word {
@@ -56,8 +56,11 @@ char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
 
 /*
  * ======== vocab ========
+ *
+ * ======== 词典 =========
  * 这个数组将保存词汇表中的所有单词。 
- * This is internal state.
+ *
+ * 私有属性。
  */
 struct vocab_word *vocab;
 
@@ -76,12 +79,12 @@ int *vocab_hash;
  * 词典将根据需要扩展，并分配，例如一次一千个单词。
  *
  * ======== vocab_size ========
- * Stores the number of unique words in the vocabulary. 
- * This is not a parameter, but rather internal state. 
+ * 词典大小。
+ * 私有属性。
  *
  * ======== layer1_size ========
- * This is the number of features in the word vectors.
- * It is the number of neurons in the hidden layer of the model.
+ * 词向量维度。
+ * 隐藏层的神经元个数。
  */
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
 
@@ -105,26 +108,29 @@ long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, class
 real alpha = 0.025, starting_alpha, sample = 1e-3;
 
 /*
- * IMPORTANT - Note that the weight matrices are stored as 1D arrays, not
- * 2D matrices, so to access row 'i' of syn0, the index is (i * layer1_size).
+ * 重要 - 参数矩阵以一维数组存储，不是二维矩阵，
+ * 所以要访问 syn0 的第i行，索引是 i * layer1_size。
  * 
  * ======== syn0 ========
- * This is the hidden layer weights (which is also the word vectors!)
+ * hidden layer的参数。
+ * 即词向量。
  *
  * ======== syn1 ========
- * This is the output layer weights *if using heirarchical softmax*
- *
+ * 使用 HS 的 output 层参数。
+ * 
  * ======== syn1neg ========
- * This is the output layer weights *if using negative sampling*
+ * 使用 NS 的output 层参数。
  *
  * ======== expTable ========
- * Stores precalcultaed activations for the output layer.
+ * 预先计算好的 sigmoid 值的表。
  */
 real *syn0, *syn1, *syn1neg, *expTable;
 clock_t start;
 
 int hs = 0, negative = 5;
+// 静态 unigram 采样表的规模
 const int table_size = 1e8;
+// unigram 采样表
 int *table;
 
 /**
@@ -134,122 +140,120 @@ int *table;
  * 选择一个词的概率就是他的权重除以所有单词的权重之和。
  *
  * 词典已经按照词频，降序排序。
- * that we will go through the vocabulary from most frequent to least.
+ * 将按词频由小到大排列。
  */
 void InitUnigramTable() {
   int a, i;
   double train_words_pow = 0;
-  
+  table = (int *)malloc(table_size * sizeof(int));
   double d1, power = 0.75;
   
-  // Allocate the table. It's bigger than the vocabulary, because words will
-  // appear in it multiple times based on their frequency.
-  // Every vocab word appears at least once in the table.
-  // The size of the table relative to the size of the vocab dictates the 
-  // resolution of the sampling. A larger unigram table means the negative 
-  // samples will be selected with a probability that more closely matches the
-  // probability calculated by the equation.
+  // 给表分配内存，它比词典更大，因为单词的词频不同，有的词会出现多次。
+  // 每个词在表中至少出现一次。
+  // table 的大小相对于词典的大小决定了采样率。
+  // 更大的 unigram table 意味着将会更以接近公式计算的概率来选择负样本。
+  // table 反应的是一个单词能量的分布，一个单词能量越大，所占位置越多。
   table = (int *)malloc(table_size * sizeof(int));
   
-  // Calculate the denominator, which is the sum of weights for all words.
+  // 计算分母，即所有词的权重总和。
   for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);
-  
-  // 'i' is the vocabulary index of the current word, whereas 'a' will be
-  // the index into the unigram table.
+ 
+  // 'i' 是当前单词的词汇索引，而 'a' 将是 unigram 表的索引。
   i = 0;
   
-  // Calculate the probability that we choose word 'i'. This is a fraction
-  // betwee 0 and 1.
+  // 计算词 'i' 的概率，(0,1]
   d1 = pow(vocab[i].cn, power) / train_words_pow;
   
-  // Loop over all positions in the table.
+  // 遍历整个表
+  // a - unigram table 表的索引
+  // i - 词典的索引
   for (a = 0; a < table_size; a++) {
-    
-    // Store word 'i' in this position. Word 'i' will appear multiple times
-    // in the table, based on its frequency in the training data.
+    // 将单词索引存入 
+    // 根据其词频，词i将在表里多次出现，次数取决于词频, 即能量越大，占的空间越多。
     table[a] = i;
     
-    // If the fraction of the table we have filled is greater than the
-    // probability of choosing this word, then move to the next word.
+    // a 是静态采样表当前遍历的索引，分母是静态采样表的大小，
+    // d1 代表当前遍历到的所有词的能量总和。
+    // 当满足一下条件，移动到下一个词.
     if (a / (double)table_size > d1) {
-      // Move to the next word.
+      // 下个词
       i++;
       
-      // Calculate the probability for the new word, and accumulate it with 
-      // the probabilities of all previous words, so that we can compare d1 to
-      // the percentage of the table that we have filled.
+      // 计算新词的概率，并将其与之前所有单词的概率相加，
+      // 这样我们就可以将d1与我们已填满部分所占百分比进行比较。
       d1 += pow(vocab[i].cn, power) / train_words_pow;
     }
-    // Don't go past the end of the vocab. 
-    // The total weights for all words should sum up to 1, so there shouldn't
-    // be any extra space at the end of the table. Maybe it's possible to be
-    // off by 1, though? Or maybe this is just precautionary.
+    // 所有单词的权重总和应该是1，所以在表的末尾不应该有任何额外的空间。
+    // 这里是预防措施，预防万一出现i超出词典长度的情况。
     if (i >= vocab_size) i = vocab_size - 1;
   }
 }
 
 /**
  * ======== ReadWord ========
- * Reads a single word from a file, assuming space + tab + EOL to be word 
- * boundaries.
+ * 从文件中读词，假设 space + tab + EOL 是词的边界。
  *
  * Parameters:
- *   word - A char array allocated to hold the maximum length string.
- *   fin  - The training file.
+ *   word - 一个已经分配了最大字符串长度的 char 数组。
+ *   fin  - 训练文件。
  */
 void ReadWord(char *word, FILE *fin) {
   
-  // 'a' will be the index into 'word'.
+  // a 是词的索引.
   int a = 0, ch;
   
-  // Read until the end of the word or the end of the file.
+  // 读到词的尾部或文件的尾部。
+  // feof 检测流上的文件结束符。
   while (!feof(fin)) {
   
-    // Get the next character.
+    // 获取下个字符。
     ch = fgetc(fin);
     
-    // ASCII Character 13 is a carriage return 'CR' whereas character 10 is 
-    // newline or line feed 'LF'.
+    // ASCII 里 13 代表回车CR,读取下个字符。
     if (ch == 13) continue;
     
-    // Check for word boundaries...
+    // 当遇到space(' ') + tab(\t) + EOL(\n)时，认为word结束。
+    // UNIX/Linux中 '\n' 为一行的结束符号，
+    // windows中为: "<回车><换行>" , 即 "\r\n"；
+    // Mac系统里，每行结尾是"<回车>" , 即"\r"。
+    // 检查词的边界。
     if ((ch == ' ') || (ch == '\t') || (ch == '\n')) {
-      // If the word has at least one character, we're done.
       if (a > 0) {
-        // Put the newline back before returning so that we find it next time.
+        // ungetc 将字符退回到输入流,所以我们下次还可以找的到。
+        // 将 '\n' 退回到流中。
         if (ch == '\n') ungetc(ch, fin);
         break;
       }
-      // If the word is empty and the character is newline, treat this as the
-      // end of a "sentence" and mark it with the token </s>.
+      // 如果单词为空且字符为换行符,将其作为句子的结尾,并用标记 </s> 来标记它。
+      // 代表句子结束。
       if (ch == '\n') {
         strcpy(word, (char *)"</s>");
         return;
-      // If the word is empty and the character is tab or space, just continue
-      // on to the next character.     
+        // 如果单词是空,且字符是 space 或 tab,继续遍历即可。
       } else continue;
     }
     
-    // If the character wasn't space, tab, CR, or newline, add it to the word.
+    // 如果字符不是 space, tab, CR, newline,  将其添加到词中。
     word[a] = ch;
     a++;
     
-    // If the word's too long, truncate it, but keep going till we find the end
-    // of it.
-    if (a >= MAX_STRING - 1) a--;   
+    // 如果词的长度太长，将其截断，但是要继续直到结束。
+    if (a >= MAX_STRING - 1) a--;
   }
   
-  // Terminate the string with null.
+  // string 以 /0 终结。
   word[a] = 0;
 }
 
 /**
  * ======== GetWordHash ========
- * Returns hash value of a word. The hash is an integer between 0 and 
+ * 返回一个词的hash 值。
+ * 一一对应。
  * vocab_hash_size (default is 30E6).
  *
  * For example, the word 'hat':
  * hash = ((((h * 257) + a) * 257) + t) % 30E6
+ * 冲突是可能的，采用开放地址发来解决。
  */
 int GetWordHash(char *word) {
   unsigned long long a, hash = 0;
@@ -260,36 +264,36 @@ int GetWordHash(char *word) {
 
 /**
  * ======== SearchVocab ========
- * Lookup the index in the 'vocab' table of the given 'word'.
- * Returns -1 if the word is not found.
- * This function uses a hash table for fast lookup.
+ * 使用单词的hash查找单词的索引。
+ * 如果不存在，返回-1。
+ * 这个函数用于词的快速检索。
+ * 如果词的数量过大 即 >> 30E6 ，这个函数可能会数组越界。
+ * 需要提高 min_reduce 来处理。
  */
 int SearchVocab(char *word) {
-  // Compute the hash value for 'word'.
+  // 计算 变量 word 的 hash值。
   unsigned int hash = GetWordHash(word);
   
-  // Lookup the index in the hash table, handling collisions as needed.
-  // See 'AddWordToVocab' to see how collisions are handled.
+  // 在散列表中查找索引，需要处理冲突。
+  // 冲突处理在 AddWordToVocab 函数中。
   while (1) {
-    // If the word isn't in the hash table, it's not in the vocab.
+    // 如果不在散列表中,就不在词典中。
     if (vocab_hash[hash] == -1) return -1;
     
-    // If the input word matches the word stored at the index, we're good,
-    // return the index.
+    // 验证输入的单词是否与所查找的词匹配。
     if (!strcmp(word, vocab[vocab_hash[hash]].word)) return vocab_hash[hash];
     
-    // Otherwise, we need to scan through the hash table until we find it.
+    // 开放地址法查询。
     hash = (hash + 1) % vocab_hash_size;
   }
   
-  // This will never be reached.
+  // 永远不会访问。
   return -1;
 }
 
 /**
  * ======== ReadWordIndex ========
- * Reads the next word from the training file, and returns its index into the
- * 'vocab' table.
+ * 读取语料的下个单词，并返回在词典 vocab 中的索引。
  */
 int ReadWordIndex(FILE *fin) {
   char word[MAX_STRING];
@@ -300,95 +304,90 @@ int ReadWordIndex(FILE *fin) {
 
 /**
  * ======== AddWordToVocab ========
- * Adds a new word to the vocabulary (one that hasn't been seen yet).
+ * 添加一个新单词到词典中，在词典中还不存在。
  */
 int AddWordToVocab(char *word) {
-  // Measure word length.
+  // 单词长度。
   unsigned int hash, length = strlen(word) + 1;
   
-  // Limit string length (default limit is 100 characters).
+  // 限制单词长度。
   if (length > MAX_STRING) length = MAX_STRING;
   
-  // Allocate and store the word string.
+  // 分配并存储词字符串。
   vocab[vocab_size].word = (char *)calloc(length, sizeof(char));
   strcpy(vocab[vocab_size].word, word);
   
-  // Initialize the word frequency to 0.
+  // 初始化词频为0
   vocab[vocab_size].cn = 0;
   
-  // Increment the vocabulary size.
+  // 增加词典的长度。
   vocab_size++;
   
-  // Reallocate memory if needed
+  // 给词典增加内存。
   if (vocab_size + 2 >= vocab_max_size) {
     vocab_max_size += 1000;
     vocab = (struct vocab_word *)realloc(vocab, vocab_max_size * sizeof(struct vocab_word));
   }
   
-  // Add the word to the 'vocab_hash' table so that we can map quickly from the
-  // string to its vocab_word structure. 
-  
-  // Hash the word to an integer between 0 and 30E6.
+  // 词的hash code, 在 0 到 30E6 之间。
   hash = GetWordHash(word);
   
-  // If the spot is already taken in the hash table, find the next empty spot.
+  // 开放地址法。
   while (vocab_hash[hash] != -1) 
     hash = (hash + 1) % vocab_hash_size;
   
-  // Map the hash code to the index of the word in the 'vocab' array.  
+  // 将词在词典中的索引插入到散列表中。
   vocab_hash[hash] = vocab_size - 1;
   
-  // Return the index of the word in the 'vocab' array.
+  // 返回单词在词典中的索引。
   return vocab_size - 1;
 }
 
-// Used later for sorting by word counts
+// 比较器，用于按词频排序。
 int VocabCompare(const void *a, const void *b) {
     return ((struct vocab_word *)b)->cn - ((struct vocab_word *)a)->cn;
 }
 
 /**
  * ======== SortVocab ========
- * Sorts the vocabulary by frequency using word counts, and removes words that
- * occur fewer than 'min_count' times in the training text.
+ * 按照词频排序，并移除语料中词频小于 min_reduce 的词。
  * 
- * Removing words from the vocabulary requires recomputing the hash table.
+ * 移除词需要重新计算散列表。
  */
 void SortVocab() {
   int a, size;
   unsigned int hash;
   
-  /*
-   * Sort the vocabulary by number of occurrences, in descending order. 
+  /**
+   * 按照词频对词典进行降序排序。
    *
-   * Keep </s> at the first position by sorting starting from index 1.
+   * </s> 在第一个位置，从索引 1 开始排序。
    *
-   * Sorting the vocabulary this way causes the words with the fewest 
-   * occurrences to be at the end of the vocabulary table. This will allow us
-   * to free the memory associated with the words that get filtered out.
+   * 以这种方式对词典进行排序，会使词频最少的单词出现在词典的尾部。
+   * 这允许我们直接释放那些需要被移除的词相关的内存。
+   * 非常好的技巧，可以省略掉重新分配。
    */
   qsort(&vocab[1], vocab_size - 1, sizeof(struct vocab_word), VocabCompare);
   
-  // Clear the vocabulary hash table.
+  // 重新初始化散列表。
   for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
   
-  // Store the initial vocab size to use in the for loop condition.
+  // 用于长度记录。
   size = vocab_size;
   
-  // Recompute the number of training words.
+  // 重新计算词的个数。
   train_words = 0;
   
-  // For every word currently in the vocab...
+  // 遍历当前词典。
   for (a = 0; a < size; a++) {
-    // If it occurs fewer than 'min_count' times, remove it from the vocabulary.
     if ((vocab[a].cn < min_count) && (a != 0)) {
-      // Decrease the size of the new vocabulary.
+      // 减小新词典的长度。
       vocab_size--;
       
-      // Free the memory associated with the word string.
+      // 释放词的内存。
       free(vocab[a].word);
     } else {
-      // Hash will be re-computed, as after the sorting it is not actual
+      // 重新计算 hash code。
       hash=GetWordHash(vocab[a].word);
       while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
       vocab_hash[hash] = a;
@@ -396,18 +395,17 @@ void SortVocab() {
     }
   }
    
-  // Reallocate the vocab array, chopping off all of the low-frequency words at
-  // the end of the table.
+  // 重新分配词典, 把表尾的所有低词频词都去掉。
   vocab = (struct vocab_word *)realloc(vocab, (vocab_size + 1) * sizeof(struct vocab_word));
   
-  // Allocate memory for the binary tree construction
+  // 给二叉树分配内存。
   for (a = 0; a < vocab_size; a++) {
     vocab[a].code = (char *)calloc(MAX_CODE_LENGTH, sizeof(char));
     vocab[a].point = (int *)calloc(MAX_CODE_LENGTH, sizeof(int));
   }
 }
 
-// Reduces the vocabulary by removing infrequent tokens
+// 去掉低频次的词以减少词典的大小
 void ReduceVocab() {
   int a, b = 0;
   unsigned int hash;
@@ -419,7 +417,7 @@ void ReduceVocab() {
   vocab_size = b;
   for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
   for (a = 0; a < vocab_size; a++) {
-    // Hash will be re-computed, as it is not actual
+    // 重新计算 hash
     hash = GetWordHash(vocab[a].word);
     while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
     vocab_hash[hash] = a;
@@ -550,7 +548,7 @@ void CreateBinaryTree() {
    *    .codelen - The length of the `code` array. 
    *               The point array has length `codelen + 1`.
    * 
-   */  
+   */
     
   // For each word in the vocabulary...
   for (a = 0; a < vocab_size; a++) {
@@ -603,23 +601,19 @@ void CreateBinaryTree() {
 
 /**
  * ======== LearnVocabFromTrainFile ========
- * Builds a vocabulary from the words found in the training file.
+ * 从训练语料中建立词典,并建立散列表来快速查询所对应的词索引。
  *
- * This function will also build a hash table which allows for fast lookup
- * from the word string to the corresponding vocab_word object.
- *
- * Words that occur fewer than 'min_count' times will be filtered out of
- * vocabulary.
+ * 如果词频数量小于 min_reduce ，词会被丢弃掉。
  */
 void LearnVocabFromTrainFile() {
   char word[MAX_STRING];
   FILE *fin;
   long long a, i;
   
-  // Populate the vocab table with -1s.
+  // -1 填充散列表。
   for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
   
-  // Open the training file.
+  // 打开训练语料
   fin = fopen(train_file, "rb");
   if (fin == NULL) {
     printf("ERROR: training data file not found!\n");
@@ -628,56 +622,51 @@ void LearnVocabFromTrainFile() {
   
   vocab_size = 0;
   
-  // The special token </s> is used to mark the end of a sentence. In training,
-  // the context window does not go beyond the ends of a sentence.
+  // 特殊标记 </s> 用于标记句子的末尾。
+  // 在训练中，contexr window 不会超过句子的末尾。
   // 
-  // Add </s> explicitly here so that it occurs at position 0 in the vocab. 
+  // 显式地添加 "</s>" 到词典中，所以让其在词典的0出出现。
   AddWordToVocab((char *)"</s>");
   
   while (1) {
-    // Read the next word from the file into the string 'word'.
+    // 从文件读取一个词到 word 中。
     ReadWord(word, fin);
     
-    // Stop when we've reached the end of the file.
+    // 当达到文件末尾时终止。
     if (feof(fin)) break;
     
-    // Count the total number of tokens in the training text.
+    // 语料中词的个数。(词的个数，不是有多少不同的词)
     train_words++;
     
-    // Print progress at every 100,000 words.
+    // 每十万个词打印一次信息。
     if ((debug_mode > 1) && (train_words % 100000 == 0)) {
       printf("%lldK%c", train_words / 1000, 13);
       fflush(stdout);
     }
     
-    // Look up this word in the vocab to see if we've already added it.
+    // 查看散列表是否已经添加了这个词。
     i = SearchVocab(word);
     
-    // If it's not in the vocab...
+    // 不存在，添加该词。
     if (i == -1) {
-      // ...add it.
       a = AddWordToVocab(word);
       
-      // Initialize the word frequency to 1.
+      // 初始化词频为1，此处有些迷惑。。直接Add的时候进行操作不行吗？
       vocab[a].cn = 1;
     
-    // If it's already in the vocab, just increment the word count.
+    // 如果已存在，增加词频。
     } else vocab[i].cn++;
     
-    // If the vocabulary has grown too large, trim out the most infrequent 
-    // words. The vocabulary is considered "too large" when it's filled more
-    // than 70% of the hash table (this is to try and keep hash collisions
-    // down).
+    // 这个代码里的散列表是没有扩容功能的,所以如果词数量过多会频繁冲突。
+    // 所以如果词的数量超过了散列表容量的70%，进行一次Reduce,即移除不频繁的词。
     if (vocab_size > vocab_hash_size * 0.7) ReduceVocab();
   }
   
-  // Sort the vocabulary in descending order by number of word occurrences.
-  // Remove (and free the associated memory) for all the words that occur
-  // fewer than 'min_count' times.
+  // 将词典按照词频降序排列
+  // 移除词频小于 min_reduce的词。
   SortVocab();
   
-  // Report the final vocabulary size, and the total number of words 
-  // (excluding those filtered from the vocabulary) in the training set.
+  // 打印词典信息，词的个数(已经移除了不频繁的词)，有多少个不同的词
   if (debug_mode > 0) {
     printf("Vocab size: %lld\n", vocab_size);
     printf("Words in train file: %lld\n", train_words);
@@ -735,67 +724,91 @@ void InitNet() {
   long long a, b;
   unsigned long long next_random = 1;
   
-  // Allocate the hidden layer of the network, which is what becomes the word vectors.
-  // The variable for this layer is 'syn0'.
+  // 词向量层
+  // syn0
+  // syn0 = 词典的长度(vocab_size)*词向量的长度(layer1_size)
+  // posix_memalign : 页对齐的内存。
+  // posix_memalign() 成功时会返回size字节的动态内存，并且这块内存的地址是alignment(这里是128)的倍数
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(real));
   
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   
-  // If we're using hierarchical softmax for training...
+  // 如果用 hierarchical softmax 训练。
   if (hs) {
     a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * layer1_size * sizeof(real));
     if (syn1 == NULL) {printf("Memory allocation failed\n"); exit(1);}
-    for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
-     syn1[a * layer1_size + b] = 0;
+    for (a = 0; a < vocab_size; a++) 
+        for (b = 0; b < layer1_size; b++)
+            syn1[a * layer1_size + b] = 0;
   }
   
-  // If we're using negative sampling for training...
-  if (negative>0) {
-    // Allocate the output layer of the network. 
-    // The variable for this layer is 'syn1neg'.
-    // This layer has the same size as the hidden layer, but is the transpose.
+  // 如果用 negative sampling 训练。
+  if (negative > 0) {
+    // 分配网络的输出层。
+    // 该层测变量为 syn1neg。
+    // 这一层的大小与隐藏层相同，但是是转置的。
+    // 如果以矩阵形式表达就是, 词向量的长度(layer1_size) * 词典的长度(vocab_size)。
     a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * layer1_size * sizeof(real));
     
     if (syn1neg == NULL) {printf("Memory allocation failed\n"); exit(1);}
     
-    // Set all of the weights in the output layer to 0.
-    for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
-     syn1neg[a * layer1_size + b] = 0;
+    // 输出层的所有参数为0。
+    for (a = 0; a < vocab_size; a++) 
+        for (b = 0; b < layer1_size; b++)
+            syn1neg[a * layer1_size + b] = 0;
   }
   
-  // Randomly initialize the weights for the hidden layer (word vector layer).
+  // 随机初始化隐藏层的参数。
   // TODO - What's the equation here?
-  for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++) {
-    next_random = next_random * (unsigned long long)25214903917 + 11;
-    syn0[a * layer1_size + b] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / layer1_size;
+  // 词向量的参数为 [-0.5,0.5] 之间的小数。
+  for (a = 0; a < vocab_size; a++) 
+    for (b = 0; b < layer1_size; b++) {
+        next_random = next_random * (unsigned long long)25214903917 + 11;
+        syn0[a * layer1_size + b] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / layer1_size;
   }
   
-  // Create a binary tree for Huffman coding.
-  // TODO - As best I can tell, this is only used for hierarchical softmax training...
+  // 创建哈夫曼树,仅用于HS。
   CreateBinaryTree();
 }
 
 /**
  * ======== TrainModelThread ========
- * This function performs the training of the model.
+ * 这个函数在训练模型。
  */
 void *TrainModelThread(void *id) {
 
   /*
-   * word - Stores the index of a word in the vocab table.
-   * word_count - Stores the total number of training words processed.
+   * word - 存储在词典中词的索引。
+   * last_word - 上一个单词，辅助扫描窗口，就当前扫描到的上下文单词。
+   * sentence_length - 当前处理的句子长度，当前句子的长度(词数)。
+   * sentence_position - 当前处理的单词在当前句子中的位置(index)。
+   * cw - 窗口长度。
    */
   long long a, b, d, cw, word, last_word, sentence_length = 0, sentence_position = 0;
+  /*
+   * word_count - 当前线程当前时刻已训练的词的个数。
+   * last_word_count - 当前线程上一次已训练的词的个数。
+   * sen - 单词数组，表示句子，从当前文件中读取的待处理的句子。
+   */
   long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
+  /*
+   * l1 -
+   * l2 - 
+   * c -
+   * target -
+   * label - 
+   */
   long long l1, l2, c, target, label, local_iter = iter;
+  // id 线程创建的时候传入，辅助随机数生成。
   unsigned long long next_random = (long long)id;
   real f, g;
+  // 当前时间，和start比较计算算法效率。
   clock_t now;
   
-  // neu1 is only used by the CBOW architecture.
+  // neu1 只用于 CBOW 模型。
   real *neu1 = (real *)calloc(layer1_size, sizeof(real));
   
-  // neu1e is used by both architectures.
+  // neu1e 两个模型都用。
   real *neu1e = (real *)calloc(layer1_size, sizeof(real));
   
   
@@ -804,19 +817,18 @@ void *TrainModelThread(void *id) {
   FILE *fi = fopen(train_file, "rb");
   fseek(fi, file_size / (long long)num_threads * (long long)id, SEEK_SET);
   
-  // This loop covers the whole training operation...
+  // 这个循环包括了整个训练流程。
   while (1) {
     
     /*
      * ======== Variables ========
-     *       iter - This is the number of training epochs to run; default is 5.
-     * word_count - The number of input words processed.
-     * train_words - The total number of words in the training text (not 
-     *               including words removed from the vocabuly by ReduceVocab).
+     *       iter - 这是训练的 epoch 数，默认为5。
+     * word_count - 要处理的词总数。
+     * train_words - 训练文本中的单词总数(不包括
+     *                 通过 ReduceVocab 从词典中删除的单词)。
      */
     
-    // This block prints a progress update, and also adjusts the training 
-    // 'alpha' parameter.
+    // 这里打印训练信息，并且调整训练的"alpha" 参数。
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
       
@@ -842,15 +854,15 @@ void *TrainModelThread(void *id) {
       if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
     }
     
-    // This 'if' block retrieves the next sentence from the training text and
-    // stores it in 'sen'.
-    // TODO - Under what condition would sentence_length not be zero?
+    // 这个判断语句检索下个句子并经其存储在"sen"中。
     if (sentence_length == 0) {
       while (1) {
         // Read the next word from the training data and lookup its index in 
         // the vocab table. 'word' is the word's vocab index.
+        // 从训练数据中读取训练数据并在词典中查找其索引。
+        // 'word' 是 word 词典索引。
         word = ReadWordIndex(fi);
-        
+
         if (feof(fi)) break;
         
         // If the word doesn't exist in the vocabulary, skip it.
@@ -865,73 +877,66 @@ void *TrainModelThread(void *id) {
         
         /* 
          * =================================
-         *   Subsampling of Frequent Words
+         *   频繁词的下采样
          * =================================
-         * This code randomly discards training words, but is designed to 
-         * keep the relative frequencies the same. That is, less frequent
-         * words will be discarded less often. 
+         * 这段代码随机丢弃训练词，但是被设计成保持相对词频相同，也就是说，
+         * 使用频率较低的词被丢弃的几率也较低。
          *
-         * We first calculate the probability that we want to *keep* the word;
-         * this is the value 'ran'. Then, to decide whether to keep the word,
-         * we generate a random fraction (0.0 - 1.0), and if 'ran' is smaller
-         * than this number, we discard the word. This means that the smaller 
-         * 'ran' is, the more likely it is that we'll discard this word. 
+         * 我们首先要计算我们想要 "保留" 的词的概率 x。
+         * 然后，为了决定是否保留这个单词，我们生成一个 (0,1) 的随机fraction，如果
+         * 'ran' 小于这个数字，我们丢弃这个词。
+         * 这意味着 'ran' 越小，我们越有可能丢弃这个单词。
          *
-         * The quantity (vocab[word].cn / train_words) is the fraction of all 
-         * the training words which are 'word'. Let's represent this fraction
-         * by x.
+         * x = (vocab[word].cn / train_words) 一个词出现次数占所有词出现次数的比例。
+         * 用 x 来表示这个fraction。
          *
-         * Using the default 'sample' value of 0.001, the equation for ran is:
+         * sample的默认值是 0.001。
+         * ran 的公式是：
          *   ran = (sqrt(x / 0.001) + 1) * (0.001 / x)
          * 
-         * You can plot this function to see it's behavior; it has a curved 
-         * L shape.
+         * 你可以画出它的图来看一下，一个 L 曲线。
          * 
-         * Here are some interesting points in this function (again this is
-         * using the default sample value of 0.001).
-         *   - ran = 1 (100% chance of being kept) when x <= 0.0026.
-         *      - That is, any word which is 0.0026 of the words *or fewer* 
-         *        will be kept 100% of the time. Only words which represent 
-         *        more than 0.26% of the total words will be subsampled.
-         *   - ran = 0.5 (50% chance of being kept) when x = 0.00746. 
-         *   - ran = 0.033 (3.3% chance of being kept) when x = 1.
-         *       - That is, if a word represented 100% of the training set
-         *         (which of course would never happen), it would only be
-         *         kept 3.3% of the time.
+         * 下面是这个函数中一些有趣的点(同样，这里使用的是默认样本值 0.001)。
+         *   - ran = 1 (100% 被留下) 即当 x<= 0.0026
+         *      - 也就是说，任何 <= 0.0026 将肯定会被保留，
+         *        仅对占词总数0.26%的词进行二次采样。
+         *   - ran = 0.5 (50% 会被保留) when x = 0.00746. 
+         *   - ran = 0.033 (3.3% 会被保留) when x = 1.
+         *       - 也就是说，如果一个词占训练集的100%(当然，永远不会发生),
+         *         那么该单词将仅保留 3.3%.
          *
-         * NOTE: Seems like it would be more efficient to pre-calculate this 
-         *       probability for each word and store it in the vocab table...
+         * NOTE: 所以看起来似乎计算每个单词的出现概率并将其存储在vocab表中会效率更高。
          *
-         * Words that are discarded by subsampling aren't added to our training
-         * 'sentence'. This means the discarded word is neither used as an 
-         * input word or a context word for other inputs.
+         * 在下采样中被丢弃掉的词将不会添加到我们训练的句子中。
+         * 这意味着这些被丢弃的词既不用做输入，也不用做其他输入的 context word.
          */
         if (sample > 0) {
-          // Calculate the probability of keeping 'word'.
+          // 计算保留该词的概率
           real ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
           
-          // Generate a random number.
-          // The multiplier is 25.xxx billion, so 'next_random' is a 64-bit integer.
+          // 生成一个随机数
+          // 64位整数
           next_random = next_random * (unsigned long long)25214903917 + 11;
 
-          // If the probability is less than a random fraction, discard the word.
+          // 如果 随机数 > ran ，丢弃该词。
           //
-          // (next_random & 0xFFFF) extracts just the lower 16 bits of the 
-          // random number. Dividing this by 65536 (2^16) gives us a fraction
-          // between 0 and 1. So the code is just generating a random fraction.
+          // (next_random & 0xFFFF) 抽取 next_random 的低16位随机数。
+          // 将这个数除以 65536 (2^16) 给我们一个 (0,1) 的分数。
+          // 所以这段代码只是生成一个随机分数。
           if (ran < (next_random & 0xFFFF) / (real)65536) continue;
         }
         
-        // If we kept the word, add it to the sentence.
+        // 如果我们保留词，则将其添加到句子里。
         sen[sentence_length] = word;
         sentence_length++;
         
-        // Verify the sentence isn't too long.
+        // 验证句子是否过长。
         if (sentence_length >= MAX_SENTENCE_LENGTH) break;
       }
       
       sentence_position = 0;
     }
+
     if (feof(fi) || (word_count > train_words / num_threads)) {
       word_count_actual += word_count - last_word_count;
       local_iter--;
@@ -943,8 +948,8 @@ void *TrainModelThread(void *id) {
       continue;
     }
     
-    // Get the next word in the sentence. The word is represented by its index
-    // into the vocab table.
+    // 找出句子中的下一个单词。
+    // 词由它在词汇表中的索引表示。
     word = sen[sentence_position];
     
     if (word == -1) continue;
@@ -952,20 +957,19 @@ void *TrainModelThread(void *id) {
     for (c = 0; c < layer1_size; c++) neu1[c] = 0;
     for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
     
-    // This is a standard random integer generator, as seen here:
+    // 这是一个标准的随机整数生成器，如下所示：
     // https://en.wikipedia.org/wiki/Linear_congruential_generator
     next_random = next_random * (unsigned long long)25214903917 + 11;
     
-    // 'b' becomes a random integer between 0 and 'window' - 1.
-    // This is the amount we will shrink the window size by.
+    // b 是一个在 0 到 window -1 之间的随机整数。
+    // 这是我们将缩小窗口大小的数量。
     b = next_random % window;
     
     /* 
      * ====================================
      *        CBOW Architecture
      * ====================================
-     * sen - This is the array of words in the sentence. Subsampling has 
-     *       already been applied. Words are represented by their ids.
+     * sen - 这是由单词组表示的句子。已经经过了下采样。词由他们的id表示。
      *
      * sentence_position - This is the index of the current input word.
      *
@@ -1186,61 +1190,58 @@ void *TrainModelThread(void *id) {
      * ====================================
      *        Skip-gram Architecture
      * ====================================
-     * sen - This is the array of words in the sentence. Subsampling has 
-     *       already been applied. Words are represented by their ids.
+     * sen - 由词组成的句子，数组表示。已经做了高频词的下采样。
+     *       词由他们的索引表示。
      *
-     * sentence_position - This is the index of the current input word.
+     * sentence_position - 当前输入词在句子中的位置。
      *
-     * a - Offset into the current window, relative to the window start.
-     *     a will range from 0 to (window * 2) 
+     * a - 当前窗口的下标，相对于window的起始索引。
+     *     a 的范围从[0 , window * 2]。
      *
-     * b - The amount to shrink the context window by.
+     * b - 要缩小的 context window 大小。
      *
-     * c - 'c' is a scratch variable used in two unrelated ways:
-     *       1. It's first used as the index of the current context word 
-     *          within the sentence (the `sen` array).
-     *       2. It's then used as the for-loop variable for calculating
-     *          vector dot-products and other arithmetic.
+     * c - 'c' 是一个 scratch 变量 以两种不相关的方式使用。
+     *     1. 它首先用作当前context(w) 在句子中的索引(sen 数组)
+     *     2. 然后，它被用作计算向量点积和其他算数运算的for循环变量。 
      *
-     * syn0 - The hidden layer weights. Note that the weights are stored as a
-     *        1D array, so word 'i' is found at (i * layer1_size).
+     * syn0 - 隐藏层的参数。注意，权重存储为一个一维数组，
+     *        因此单词 'i' 在 (i * layer1_size) 找到。
      *
-     * l1 - Index into the hidden layer (syn0). Index of the start of the
-     *      weights for the current input word.
+     * l1 - 索引到隐藏层(syn0)。当前输入词的权重开头的索引。
      *
-     * target - The output word we're working on. If it's the positive sample
-     *          then `label` is 1. `label` is 0 for negative samples.
-     *          Note: `target` and `label` are only used in negative sampling,
-     *                and not HS.     
+     * target - 我们正在训练的输出词。
+     *          如果它是正样本，那么 “标签” 是1。
+     *          注: “target” 和 “label” 只用于 Negative sampling，而非HS。
      */
     else {  
-      // Loop over the positions in the context window (skipping the word at
-      // the center). 'a' is just the offset within the window, it's not 
-      // the index relative to the beginning of the sentence.
+      /*
+       * 遍历 context window 中的位置 (跳过中心词)。
+       * a 是在 context window 内的相对索引，不是句子的开始索引。
+       */
       for (a = b; a < window * 2 + 1 - b; a++) if (a != window) {
-        
-        // Convert the window offset 'a' into an index 'c' into the sentence 
-        // array.
+        // 将 context window 内的相对索引 'a' 转换成句子中的相对索引 'c'。
         c = sentence_position - window + a;
         
-        // Verify c isn't outisde the bounds of the sentence.
+        // 确定c 的索引在句子的范围内。
         if (c < 0) continue;
         if (c >= sentence_length) continue;
         
-        // Get the context word. That is, get the id of the word (its index in
-        // the vocab table).
+        // 获取 context word ，也就是说，获取单词的id(在词典中的索引)。
         last_word = sen[c];
         
-        // At this point we have two words identified:
-        //   'word' - The word at our current position in the sentence (in the
-        //            center of a context window).
-        //   'last_word' - The word at a position within the context window.
+        // 至此，我们已经确定了两个词
+        //   'word' - 在句子中当前位置的单词。(context window 的中心)
+        // 
+        //   'last_word' - 位于 context window 内某个位置的词。
         
-        // Verify that the word exists in the vocab (I don't think this should
-        // ever be the case?)
+        // 验证词是否存在于词典中。
+
+        // 在这一点上，我们确定了两个词:
+        // 'word' - 在句子中当前位置的词(在上下文窗口的中心位置)。
+        // 'last_word' - 位于 context window 内某个位置的单词。
         if (last_word == -1) continue;
         
-        // Calculate the index of the start of the weights for 'last_word'.
+        // 计算 'last_word' 的索引。
         l1 = last_word * layer1_size;
         
         for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
@@ -1263,40 +1264,36 @@ void *TrainModelThread(void *id) {
         }
         
         // NEGATIVE SAMPLING
-        // Rather than performing backpropagation for every word in our 
-        // vocabulary, we only perform it for a few words (the number of words 
-        // is given by 'negative').
-        // These words are selected using a "unigram" distribution, which is generated
-        // in the function InitUnigramTable
+        // 我们不会对词典中的每个词都执行反向传播，而是只对少数词执行反向传播
+        // (单词的数量由'negative'给出)。
+        // 这些单词是使用'unigram' 分布进行选择的，
+        // 该分布式在函数 InitUnigramTable 中生成的。
         if (negative > 0) for (d = 0; d < negative + 1; d++) {
-          // On the first iteration, we're going to train the positive sample.
+          // 第一次迭代我们去训练正样本。
           if (d == 0) {
             target = word;
             label = 1;
-          // On the other iterations, we'll train the negative samples.
+          // 其他的迭代训练负样本。
           } else {
-            // Pick a random word to use as a 'negative sample'; do this using 
-            // the unigram table.
-            
-            // Get a random integer.
+            // 在能量表中随机抽取负样本，采样使得与target不同，label为0,
+            // 也即最多采样 negative 个负样本。
+            // 获取一个随机整数。
             next_random = next_random * (unsigned long long)25214903917 + 11;
             
-            // 'target' becomes the index of the word in the vocab to use as
-            // the negative sample.
+            // 'target' 成为词汇中单词的索引，作为负样本使用。
             target = table[(next_random >> 16) % table_size];
             
-            // If the target is the special end of sentence token, then just
-            // pick a random word from the vocabulary instead.
+            // 如果目标是特殊的句子结束标记，那么只需从词汇表中随机选择一个词即可。
             if (target == 0) target = next_random % (vocab_size - 1) + 1;
             
-            // Don't use the positive sample as a negative sample!
+            // 不要把正样本做负样本使用!
             if (target == word) continue;
             
-            // Mark this as a negative example.
+            // 标记为负样本
             label = 0;
           }
           
-          // Get the index of the target word in the output layer.
+          // 获取 target word 在输出层的索引。
           l2 = target * layer1_size;
           
           // At this point, our two words are represented by their index into
@@ -1314,7 +1311,8 @@ void *TrainModelThread(void *id) {
           
           // This block does two things:
           //   1. Calculates the output of the network for this training
-          //      pair, using the expTable to evaluate the output layer
+          //  g rate.
+          if (f > MAX_EXP) g = (label - 1) * alpha;    pair, using the expTable to evaluate the output layer
           //      activation function.
           //   2. Calculate the error at the output, stored in 'g', by
           //      subtracting the network output from the desired output, 
@@ -1359,7 +1357,7 @@ void *TrainModelThread(void *id) {
 
 /**
  * ======== TrainModel ========
- * Main entry point to the training process.
+ * 训练流程的主入口。
  */
 void TrainModel() {
   long a, b, c, d;
@@ -1371,28 +1369,26 @@ void TrainModel() {
   
   starting_alpha = alpha;
   
-  // Either load a pre-existing vocabulary, or learn the vocabulary from 
-  // the training file.
+  // 要么加载已有的词典，要么训练词典。
   if (read_vocab_file[0] != 0) ReadVocab(); else LearnVocabFromTrainFile();
   
-  // Save the vocabulary.
+  // 保存词典。
   if (save_vocab_file[0] != 0) SaveVocab();
   
-  // Stop here if no output_file was specified.
+  // 如果没有指定输出文件从这里退出。
   if (output_file[0] == 0) return;
   
-  // Allocate the weight matrices and initialize them.
+  // 初始化权重矩阵。
   InitNet();
 
-  // If we're using negative sampling, initialize the unigram table, which
-  // is used to pick words to use as "negative samples" (with more frequent
-  // words being picked more often).  
+  // 如果我们使用 negative sampling , 初始化单词能量表，
+  // 用于 negative samples的采样。
   if (negative > 0) InitUnigramTable();
   
-  // Record the start time of training.
+  // 记录训练开始时间。
   start = clock();
   
-  // Run training, which occurs in the 'TrainModelThread' function.
+  // 开始训练，即 TrainModelThread 函数
   for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
   for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
   
@@ -1533,7 +1529,7 @@ int main(int argc, char **argv) {
   if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]);
   
-  // Allocate the vocabulary table.
+  // 分配词典
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   
   // Allocate the hash table for mapping word strings to word entries.
