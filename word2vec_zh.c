@@ -601,6 +601,7 @@ void CreateBinaryTree() {
 
 /**
  * ======== LearnVocabFromTrainFile ========
+ *
  * 从训练语料中建立词典,并建立散列表来快速查询所对应的词索引。
  *
  * 如果词频数量小于 min_reduce ，词会被丢弃掉。
@@ -792,11 +793,11 @@ void *TrainModelThread(void *id) {
    */
   long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
   /*
-   * l1 -
-   * l2 - 
-   * c -
-   * target -
-   * label - 
+   * l1 - 在 skip-gram 模型中，在 syn0 中定位当前词词向量的起始位置。
+   *    - l1 ns 中表示 word 在 concatenated word vectors 中的起始位置，
+   *      之后 layer1_size 是对应的 word vector，因为把矩阵拉成长向量了 说的不太懂。
+   * l2 - 在 syn1 或 syn1neg 中定位中间节点向量或负采样向量的起始位置。
+   *    - cbow 或 ns 中权重向量的起始位置，之后 layer1_size 是对应的 syn1 或 syn1neg，因为把矩阵拉成长向量了。
    */
   long long l1, l2, c, target, label, local_iter = iter;
   // id 线程创建的时候传入，辅助随机数生成。
@@ -811,13 +812,11 @@ void *TrainModelThread(void *id) {
   // neu1e 两个模型都用。
   real *neu1e = (real *)calloc(layer1_size, sizeof(real));
   
-  
-  // Open the training file and seek to the portion of the file that this 
-  // thread is responsible for.
+  // 为每个线程分配不同的语料。
   FILE *fi = fopen(train_file, "rb");
   fseek(fi, file_size / (long long)num_threads * (long long)id, SEEK_SET);
   
-  // 这个循环包括了整个训练流程。
+  // 整个训练流程。
   while (1) {
     
     /*
@@ -857,22 +856,19 @@ void *TrainModelThread(void *id) {
     // 这个判断语句检索下个句子并经其存储在"sen"中。
     if (sentence_length == 0) {
       while (1) {
-        // Read the next word from the training data and lookup its index in 
-        // the vocab table. 'word' is the word's vocab index.
         // 从训练数据中读取训练数据并在词典中查找其索引。
         // 'word' 是 word 词典索引。
         word = ReadWordIndex(fi);
 
         if (feof(fi)) break;
         
-        // If the word doesn't exist in the vocabulary, skip it.
+        // 如果词在词典中不存在，跳过这个词。
         if (word == -1) continue;
         
-        // Track the total number of training words processed.
+        // 记录训练了多少个词。
         word_count++;
         
-        // 'vocab' word 0 is a special token "</s>" which indicates the end of 
-        // a sentence.
+        // 词典的次一个词是"</s>"，表示一个句子的末尾。
         if (word == 0) break;
         
         /* 
@@ -971,34 +967,26 @@ void *TrainModelThread(void *id) {
      * ====================================
      * sen - 这是由单词组表示的句子。已经经过了下采样。词由他们的id表示。
      *
-     * sentence_position - This is the index of the current input word.
+     * sentence_position - 当前输入词的索引。
      *
-     * a - Offset into the current window, relative to the window start.
-     *     a will range from 0 to (window * 2) 
+     * a - 当前窗口的相对坐标， [0, 2*window]
      *
-     * b - The amount to shrink the context window by.
+     * b - 窗口缩减参数。
      *
-     * c - 'c' is a scratch variable used in two unrelated ways:
-     *       1. It's first used as the index of the current context word 
-     *          within the sentence (the `sen` array).
-     *       2. It's then used as the for-loop variable for calculating
-     *          vector dot-products and other arithmetic.
+     * c - 循环变量，用在两个地方。
+     *       1. 首先用于在句内当前词的索引, sen数组。
+     *       2. 然后用于循环变量来计算点乘和其他运算。
      *
-     * syn0 - The hidden layer weights. Note that the weights are stored as a
-     *        1D array, so word 'i' is found at (i * layer1_size).
+     * syn0 - 隐藏层参数，以一维数组的形式存储。
      *
-     * target - The output word we're working on. If it's the positive sample
-     *          then `label` is 1. `label` is 0 for negative samples.  
-     *          Note: `target` and `label` are only used in negative sampling,
-     *                and not HS.
+     * target - 当前输出，如果是正样本 label = 1, 负样本是0，
+     *          target 和 label 只用于 Negative sampling 中，而非 HS。
      *
-     * neu1 - This vector will hold the *average* of all of the context word
-     *        vectors. This is the output of the hidden layer for CBOW.
+     * neu1 - 这个向量保存所有 context(w)的平均值，即隐藏层的输出。
      *
-     * neu1e - Holds the gradient for updating the hidden layer weights.
-     *         It's a vector of length 300, not a matrix.
-     *         This same gradient update is applied to all context word 
-     *         vectors.
+     * neu1e - 保留用于更新隐藏层参数的梯度。它是一个长约300的向量，不是一个矩阵。
+     *         同样梯度的更新用于所有的上下文向量。
+     *
      */
     if (cbow) {  //train the cbow architecture
       // in -> hidden
