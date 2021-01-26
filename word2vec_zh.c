@@ -777,7 +777,6 @@ void InitNet() {
  * 这个函数在训练模型。
  */
 void *TrainModelThread(void *id) {
-
   /*
    * word - 存储在词典中词的索引。
    * last_word - 上一个单词，辅助扫描窗口，就当前扫描到的上下文单词。
@@ -821,56 +820,63 @@ void *TrainModelThread(void *id) {
     
     /*
      * ======== Variables ========
+     * 自适应学习率的调整。
+     *
      *       iter - 这是训练的 epoch 数，默认为5。
      * word_count - 要处理的词总数。
      * train_words - 训练文本中的单词总数(不包括
      *                 通过 ReduceVocab 从词典中删除的单词)。
      */
-    
-    // 这里打印训练信息，并且调整训练的"alpha" 参数。
+    // 这里打印训练信息，并且调整训练的 alpha 参数。
+    // 自适应学习率调整，每训练1万个词调整一次。
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
-      
       last_word_count = word_count;
       
-      // The percentage complete is based on the total number of passes we are
-      // doing and not just the current pass.      
+      // 完成的百分比是基于我们已经训练过的词的总数，而不仅仅是当前的数量。
       if ((debug_mode > 1)) {
-        now=clock();
-        printf("%cAlpha: %f  Progress: %.2f%%  Words/thread/sec: %.2fk  ", 13, alpha,
-         // Percent complete = [# of input words processed] / 
-         //                      ([# of passes] * [# of words in a pass])
+        // Percent complete = [# of input words processed] / 
+        //                      ([# of passes] * [# of words in a pass])
+        // 完成的百分比。
+        printf("%cAlpha: %f  Progress: %.2f%%  Words/thread/sec: %.2fk  ", 
+         13, alpha,
          word_count_actual / (real)(iter * train_words + 1) * 100,
          word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
         fflush(stdout);
       }
       
-      // Update alpha to: [initial alpha] * [percent of training remaining]
-      // This means that alpha will gradually decrease as we progress through 
-      // the training text.
+      // 将alpha 更新为: [初始alpha] * [剩余的语料比例]
+      // 学习率随着训练的语料越多而变小。
       alpha = starting_alpha * (1 - word_count_actual / (real)(iter * train_words + 1));
-      // Don't let alpha go below [initial alpha] * 0.0001.
-      if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
+      // 学习率的最小值 = 初始学习率的0.0001。
+      if (alpha < starting_alpha * 0.0001)
+        alpha = starting_alpha * 0.0001;
     }
     
-    // 这个判断语句检索下个句子并经其存储在"sen"中。
+    /*
+     * =============句采样=============
+     * 每次从语料中读一个句子并存到sen中，并对所有词进行下采样。
+     */
     if (sentence_length == 0) {
       while (1) {
         // 从训练数据中读取训练数据并在词典中查找其索引。
-        // 'word' 是 word 词典索引。
+        // word 是 word 在词典中的索引。
         word = ReadWordIndex(fi);
 
-        if (feof(fi)) break;
+        if (feof(fi))
+            break;
         
         // 如果词在词典中不存在，跳过这个词。
-        if (word == -1) continue;
+        if (word == -1)
+            continue;
         
         // 记录训练了多少个词。
         word_count++;
         
         // 词典的次一个词是"</s>"，表示一个句子的末尾。
-        if (word == 0) break;
-        
+        if (word == 0)
+            break;
+
         /* 
          * =================================
          *   频繁词的下采样
@@ -901,12 +907,13 @@ void *TrainModelThread(void *id) {
          *       - 也就是说，如果一个词占训练集的100%(当然，永远不会发生),
          *         那么该单词将仅保留 3.3%.
          *
-         * NOTE: 所以看起来似乎计算每个单词的出现概率并将其存储在vocab表中会效率更高。
+         * NOTE: 所以看起来似乎计算每个单词的出现概率并将其存储在 vocab 表中会效率更高。
          *
          * 在下采样中被丢弃掉的词将不会添加到我们训练的句子中。
          * 这意味着这些被丢弃的词既不用做输入，也不用做其他输入的 context word.
          */
         if (sample > 0) {
+          // 对当前词 即 word 进行下采样。
           // 计算保留该词的概率
           real ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
           
@@ -926,8 +933,9 @@ void *TrainModelThread(void *id) {
         sen[sentence_length] = word;
         sentence_length++;
         
-        // 验证句子是否过长。
-        if (sentence_length >= MAX_SENTENCE_LENGTH) break;
+        // 句子截断
+        if (sentence_length >= MAX_SENTENCE_LENGTH) 
+            break;
       }
       
       sentence_position = 0;
@@ -936,7 +944,8 @@ void *TrainModelThread(void *id) {
     if (feof(fi) || (word_count > train_words / num_threads)) {
       word_count_actual += word_count - last_word_count;
       local_iter--;
-      if (local_iter == 0) break;
+      if (local_iter == 0) 
+        break;
       word_count = 0;
       last_word_count = 0;
       sentence_length = 0;
@@ -948,16 +957,21 @@ void *TrainModelThread(void *id) {
     // 词由它在词汇表中的索引表示。
     word = sen[sentence_position];
     
-    if (word == -1) continue;
+    if (word == -1) 
+        continue;
     
-    for (c = 0; c < layer1_size; c++) neu1[c] = 0;
-    for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
+    // 初始化参数
+    for (c = 0; c < layer1_size; c++) 
+        neu1[c] = 0;
+    for (c = 0; c < layer1_size; c++) 
+        neu1e[c] = 0;
     
     // 这是一个标准的随机整数生成器，如下所示：
     // https://en.wikipedia.org/wiki/Linear_congruential_generator
+    // 线性同余发生器
     next_random = next_random * (unsigned long long)25214903917 + 11;
     
-    // b 是一个在 0 到 window -1 之间的随机整数。
+    // b 是一个在 0 到 window - 1 之间的随机整数。
     // 这是我们将缩小窗口大小的数量。
     b = next_random % window;
     
@@ -965,11 +979,11 @@ void *TrainModelThread(void *id) {
      * ====================================
      *        CBOW Architecture
      * ====================================
-     * sen - 这是由单词组表示的句子。已经经过了下采样。词由他们的id表示。
+     * sen - 这是由单词组表示的句子。已经经过了下采样。词由他们的索引表示。
      *
      * sentence_position - 当前输入词的索引。
      *
-     * a - 当前窗口的相对坐标， [0, 2*window]
+     * a - 当前窗口的相对坐标， [0, 2 * window]
      *
      * b - 窗口缩减参数。
      *
@@ -979,200 +993,190 @@ void *TrainModelThread(void *id) {
      *
      * syn0 - 隐藏层参数，以一维数组的形式存储。
      *
-     * target - 当前输出，如果是正样本 label = 1, 负样本是0，
+     * target - 当前输出，如果是正样本 label = 1, 负样本 label = 0，
      *          target 和 label 只用于 Negative sampling 中，而非 HS。
      *
-     * neu1 - 这个向量保存所有 context(w)的平均值，即隐藏层的输出。
+     * neu1 - 这个向量保存所有 context(w)  的平均值(w 跳过中心词)，即隐藏层的输出。
      *
-     * neu1e - 保留用于更新隐藏层参数的梯度。它是一个长约300的向量，不是一个矩阵。
+     * neu1e - 保留用于更新隐藏层参数的梯度。它是一个长约 300 的向量，不是一个矩阵。
      *         同样梯度的更新用于所有的上下文向量。
-     *
      */
-    if (cbow) {  //train the cbow architecture
-      // in -> hidden
+    if (cbow) {
+      // --------------------cbow 模型训练--------------------
+      // input -> hidden
       cw = 0;
       
-      // This loop will sum together the word vectors for all of the context
-      // words.
-      //
-      // Loop over the positions in the context window (skipping the word at
-      // the center). 'a' is just the offset within the window, it's not the 
-      // index relative to the beginning of the sentence.
-      for (a = b; a < window * 2 + 1 - b; a++) if (a != window) {
-
-        // Convert the window offset 'a' into an index 'c' into the sentence 
-        // array.
-        c = sentence_position - window + a;
-        
-        // Verify c isn't outisde the bounds of the sentence.
-        if (c < 0) continue;
-        if (c >= sentence_length) continue;
-        
-        // Get the context word. That is, get the id of the word (its index in
-        // the vocab table).
-        last_word = sen[c];
-        
-        // At this point we have two words identified:
-        //   'word' - The word (word ID) at our current position in the 
-        //            sentence (in the center of a context window).
-        //   'last_word' - The word (word ID) at a position within the context
-        //                 window.       
-        
-        // Verify that the word exists in the vocab
-        if (last_word == -1) continue;
-        
-        // Add the word vector for this context word to the running sum in 
-        // neur1.
-        // `layer1_size` is 300, `neu1` is length 300
-        for (c = 0; c < layer1_size; c++) neu1[c] += syn0[c + last_word * layer1_size];
-        
-        // Count the number of context words.
-        cw++;
-      }
+      // 这个循环将所有 context(w) 的词向量相加。
+      // 遍历上下文窗口中的索引(跳过中间词)。
+      // a 只是窗口内的相对偏移量，而不是相对于句子开头的索引。
+      // a 的起始索引是可以优化的。
+      for (a = b; a < window * 2 + 1 - b; a++) 
+          if (a != window) {
+            // 将 a 转换成句子内的偏移量。
+            // c 是相对于句子的索引，a 是相对于context word 的索引。
+            c = sentence_position - window + a;
+            // 验证 c 是否在句子范围内。
+            if (c < 0) 
+                continue;
+            if (c >= sentence_length) 
+                continue;
+            
+            // 获取上下文单词。也就是说，获取单词的 在词汇表中的索引。
+            last_word = sen[c];
+            
+            // 'word' - 在句子中当前位置的词(在上下文窗口的中心位置)。
+            // 'last_word' - 位于 context window 内某个位置的单词。
+            // 验证这两个词是否在词典中。
+            if (last_word == -1) 
+                continue;
+            
+            // 将每个词的词向量加到 neu1 上求和。
+            for (c = 0; c < layer1_size; c++) 
+                neu1[c] += syn0[c + last_word * layer1_size];
+            
+            // 计算词的数量。
+            cw++;
+          }
       
-      // Skip if there were somehow no context words.
+      // 如果没有 context word 跳过循环。
       if (cw) {
+        // neu1 是 context word 的和, 现在要求平均值。
+        // 求平均部分应该是可以一次循环完成的。
+        for (c = 0; c < layer1_size; c++) 
+            neu1[c] /= cw;
         
-        // neu1 was the sum of the context word vectors, and now becomes
-        // their average. 
-        for (c = 0; c < layer1_size; c++) neu1[c] /= cw;
-        
-        // // HIERARCHICAL SOFTMAX
+        // HIERARCHICAL SOFTMAX
         // vocab[word]
         //   .point - A variable-length list of row ids, which are the output
         //            rows to train on.
         //   .code - A variable-length list of 0s and 1s, which are the desired
         //           labels for the outputs in `point`.
-        //   .codelen - The length of the `code` array for this 
-        //              word.
+        //   .codelen - The length of the `code` array for this word.
         // 
-        if (hs) for (d = 0; d < vocab[word].codelen; d++) {
-          f = 0;
-          // point[d] is the index of a row of the ouput matrix.
-          // l2 is the index of that word in the output layer weights (syn1).
-          l2 = vocab[word].point[d] * layer1_size;
-          
-          // Propagate hidden -> output
-          // neu1 is the average of the context words from the hidden layer.
-          // This loop computes the dot product between neu1 and the output
-          // weights for the output word at point[d].
-          for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];
-          
-          // Apply the sigmoid activation to the current output neuron.
-          if (f <= -MAX_EXP) continue;
-          else if (f >= MAX_EXP) continue;
-          else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
-          
-          // 'g' is the error multiplied by the learning rate.
-          // The error is (label - f), so label = (1 - code), meaning if
-          // code is 0, then this is a positive sample and vice versa.
-          g = (1 - vocab[word].code[d] - f) * alpha;
-          // Propagate errors output -> hidden
-          for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];
-          // Learn weights hidden -> output
-          for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * neu1[c];
-        }
+        if (hs) 
+            for (d = 0; d < vocab[word].codelen; d++) {
+              f = 0;
+              // point[d] is the index of a row of the ouput matrix.
+              // l2 is the index of that word in the output layer weights (syn1).
+              l2 = vocab[word].point[d] * layer1_size;
+              
+              // Propagate hidden -> output
+              // neu1 is the average of the context words from the hidden layer.
+              // This loop computes the dot product between neu1 and the output
+              // weights for the output word at point[d].
+              for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];
+              
+              // Apply the sigmoid activation to the current output neuron.
+              if (f <= -MAX_EXP) continue;
+              else if (f >= MAX_EXP) continue;
+              else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
+              
+              // 'g' is the error multiplied by the learning rate.
+              // The error is (label - f), so label = (1 - code), meaning if
+              // code is 0, then this is a positive sample and vice versa.
+              g = (1 - vocab[word].code[d] - f) * alpha;
+              // Propagate errors output -> hidden
+              for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];
+              // Learn weights hidden -> output
+              for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * neu1[c];
+            }
         
         // NEGATIVE SAMPLING
-        // Rather than performing backpropagation for every word in our 
-        // vocabulary, we only perform it for the positive sample and a few
-        // negative samples (the number of words is given by 'negative').
-        // These negative words are selected using a "unigram" distribution, 
-        // which is generated in the function InitUnigramTable.        
-        if (negative > 0) for (d = 0; d < negative + 1; d++) {
-          // On the first iteration, we're going to train the positive sample.
-          if (d == 0) {
-            target = word;
-            label = 1;
-          
-          // On the other iterations, we'll train the negative samples.
-          } else {
-            // Pick a random word to use as a 'negative sample'; do this using 
-            // the unigram table.
-            
-            // Get a random integer.              
-            next_random = next_random * (unsigned long long)25214903917 + 11;
-            
-            // 'target' becomes the index of the word in the vocab to use as
-            // the negative sample.            
-            target = table[(next_random >> 16) % table_size];
-            
-            // If the target is the special end of sentence token, then just
-            // pick a random word from the vocabulary instead.            
-            if (target == 0) target = next_random % (vocab_size - 1) + 1;
+        // 我们不会对词典中的每个词都执行反向传播，而是只对少数词执行反向传播
+        // (单词的数量由'negative'给出)。
+        // 这些单词是使用'unigram' 分布进行选择的，
+        // 该分布式在函数 InitUnigramTable 中生成的。
+        if (negative > 0) 
+            for (d = 0; d < negative + 1; d++) {
+              // 第一次迭代训练正样本
+              if (d == 0) {
+                target = word;
+                label = 1;
+              // 剩下的迭代训练负样本。
+              } else {
+                // 在能量表中随机抽取负样本，采样使得与target不同，label为0,
+                // 也即最多采样 negative 个负样本。
+                // 获取一个随机整数。
+                next_random = next_random * (unsigned long long)25214903917 + 11;
+                
+                // 'target' 成为词汇中单词的索引，作为负样本使用。
+                target = table[(next_random >> 16) % table_size];
 
-            // Don't use the positive sample as a negative sample!            
-            if (target == word) continue;
-            
-            // Mark this as a negative example.
-            label = 0;
-          }
-          
-          // At this point, target might either be the positive sample or a 
-          // negative sample, depending on the value of `label`.
-          
-          // Get the index of the target word in the output layer.
-          l2 = target * layer1_size;
-          
-          // Calculate the dot product between:
-          //   neu1 - The average of the context word vectors.
-          //   syn1neg[l2] - The output weights for the target word.
-          f = 0;
-          for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];
+                // 如果目标是特殊的句子结束标记，那么只需从词汇表中随机选择一个词即可。
+                if (target == 0) target = next_random % (vocab_size - 1) + 1;
+                // 不要把正样本做为负样本使用。
+                if (target == word) continue;
 
-          // This block does two things:
-          //   1. Calculates the output of the network for this training
-          //      pair, using the expTable to evaluate the output layer
-          //      activation function.
-          //   2. Calculate the error at the output, stored in 'g', by
-          //      subtracting the network output from the desired output, 
-          //      and finally multiply this by the learning rate.          
-          if (f > MAX_EXP) g = (label - 1) * alpha;
-          else if (f < -MAX_EXP) g = (label - 0) * alpha;
-          else g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
-          
-          // Multiply the error by the output layer weights.
-          // (I think this is the gradient calculation?)
-          // Accumulate these gradients over all of the negative samples.          
-          for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
+                // 标记为负样本。
+                label = 0;
+              }
+              
+              // target 是正样本或负样本取决于 label 的值。
+              // target 在输出层的其实索引。
+              l2 = target * layer1_size;
+              
+              // 计算 neu1 和 syn1neg 的点积:
+              //   neu1 - context word 向量的平均值。
+              //   syn1neg[l2] - 输出层向量起始索引。
+              // 
+              // f 为输入向量 neu1 与辅助向量的内积，
+              // 在负采样优化中，每个 word 都对应一个辅助向量 Theta(syn1neg)。
+              f = 0;
+              for (c = 0; c < layer1_size; c++) 
+                f += neu1[c] * syn1neg[c + l2];
 
-          // Update the output layer weights by multiplying the output error
-          // by the average of the context word vectors.
-          for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];
-        }
+              //   1. 使用sigmoid(expTable查表)函数，来激活输出，计算最终的输出。
+              //   2. 计算输出层的误差, 存在g中, g = (label - sigmoid(output)) * alpha
+              if (f > MAX_EXP) 
+                g = (label - 1) * alpha;
+              else if (f < -MAX_EXP) 
+                g = (label - 0) * alpha;
+              else 
+                g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
+              
+              // neu1e-累积误差，直到一轮抽样完了后才能更新输入层的词向量。
+              // 隐藏层的误差。
+              for (c = 0; c < layer1_size; c++) 
+                neu1e[c] += g * syn1neg[c + l2];
+
+              // 通过将输出误差乘以上下文词向量的平均值以更新参数。 
+              // syn1neg
+              for (c = 0; c < layer1_size; c++) 
+                syn1neg[c + l2] += g * neu1[c];
+            }
          
-        // hidden -> in
-        // Backpropagate the error to the hidden layer (the word vectors).
-        // This code is used both for heirarchical softmax and for negative
-        // sampling.
+        // 隐藏层到输入层的反向传播传播。
+        // 这段代码 HS 和 NS 都会用到。
+        // 反向传播。
         //
-        // Loop over the positions in the context window (skipping the word at
-        // the center). 'a' is just the offset within the window, it's not 
-        // the index relative to the beginning of the sentence.
-        for (a = b; a < window * 2 + 1 - b; a++) if (a != window) {
-          // Convert the window offset 'a' into an index 'c' into the sentence 
-          // array.
-          c = sentence_position - window + a;
-          
-          // Verify c isn't outisde the bounds of the sentence.
-          if (c < 0) continue;
-          if (c >= sentence_length) continue;
-          
-          // Get the context word. That is, get the id of the word (its index in
-          // the vocab table).
-          last_word = sen[c];
-          
-          // Verify word exists in vocab.
-          if (last_word == -1) continue;
-          
-          // Note that `c` is no longer the sentence position, it's just a 
-          // for-loop index.
-          // Add the gradient in the vector `neu1e` to the word vector for
-          // the current context word.
-          // syn0[last_word * layer1_size] <-- Accesses the word vector.
-          for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
+        // 遍历 context window 的所有索引，跳过中间词。
+        // a 是 window 内的相对索引，不是句子的相对索引。
+        for (a = b; a < window * 2 + 1 - b; a++) 
+            if (a != window) {
+              // 转化索引 a 为句子中的相对索引。
+              c = sentence_position - window + a;
+              
+              // 越界检查。
+              if (c < 0) 
+                continue;
+              if (c >= sentence_length) 
+                continue;
+              
+              // 获取 context(w)。
+              // 即获取在词典中的索引。
+              last_word = sen[c];
+              
+              // 验证 context(w) 是否在词典中。
+              if (last_word == -1) 
+                continue;
+              
+              // 这里的 c 不再是相对于句子中的索引，只用于遍历词向量的所有分量。
+              // syn0[last_word * layer1_size] <-- 如何访问词向量。
+              // 更新词向量。
+              for (c = 0; c < layer1_size; c++) 
+                syn0[c + last_word * layer1_size] += neu1e[c];
+            }
         }
-      }
     } 
     /* 
      * ====================================
@@ -1206,127 +1210,134 @@ void *TrainModelThread(void *id) {
        * 遍历 context window 中的位置 (跳过中心词)。
        * a 是在 context window 内的相对索引，不是句子的开始索引。
        */
-      for (a = b; a < window * 2 + 1 - b; a++) if (a != window) {
-        // 将 context window 内的相对索引 'a' 转换成句子中的相对索引 'c'。
-        c = sentence_position - window + a;
-        
-        // 确定c 的索引在句子的范围内。
-        if (c < 0) continue;
-        if (c >= sentence_length) continue;
-        
-        // 获取 context word ，也就是说，获取单词的id(在词典中的索引)。
-        last_word = sen[c];
-        
-        // 至此，我们已经确定了两个词
-        //   'word' - 在句子中当前位置的单词。(context window 的中心)
-        // 
-        //   'last_word' - 位于 context window 内某个位置的词。
-        
-        // 验证词是否存在于词典中。
-
-        // 在这一点上，我们确定了两个词:
-        // 'word' - 在句子中当前位置的词(在上下文窗口的中心位置)。
-        // 'last_word' - 位于 context window 内某个位置的单词。
-        if (last_word == -1) continue;
-        
-        // 计算 'last_word' 的索引。
-        l1 = last_word * layer1_size;
-        
-        for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
-        
-        // HIERARCHICAL SOFTMAX
-        if (hs) for (d = 0; d < vocab[word].codelen; d++) {
-          f = 0;
-          l2 = vocab[word].point[d] * layer1_size;
-          // Propagate hidden -> output
-          for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1[c + l2];
-          if (f <= -MAX_EXP) continue;
-          else if (f >= MAX_EXP) continue;
-          else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
-          // 'g' is the gradient multiplied by the learning rate
-          g = (1 - vocab[word].code[d] - f) * alpha;
-          // Propagate errors output -> hidden
-          for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];
-          // Learn weights hidden -> output
-          for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * syn0[c + l1];
-        }
-        
-        // NEGATIVE SAMPLING
-        // 我们不会对词典中的每个词都执行反向传播，而是只对少数词执行反向传播
-        // (单词的数量由'negative'给出)。
-        // 这些单词是使用'unigram' 分布进行选择的，
-        // 该分布式在函数 InitUnigramTable 中生成的。
-        if (negative > 0) for (d = 0; d < negative + 1; d++) {
-          // 第一次迭代我们去训练正样本。
-          if (d == 0) {
-            target = word;
-            label = 1;
-          // 其他的迭代训练负样本。
-          } else {
-            // 在能量表中随机抽取负样本，采样使得与target不同，label为0,
-            // 也即最多采样 negative 个负样本。
-            // 获取一个随机整数。
-            next_random = next_random * (unsigned long long)25214903917 + 11;
+      for (a = b; a < window * 2 + 1 - b; a++) 
+          if (a != window) {
+            // 将 context window 内的相对索引 'a' 转换成句子中的相对索引 'c'。
+            c = sentence_position - window + a;
             
-            // 'target' 成为词汇中单词的索引，作为负样本使用。
-            target = table[(next_random >> 16) % table_size];
+            // 确定c 的索引在句子的范围内。
+            if (c < 0) continue;
+            if (c >= sentence_length) continue;
             
-            // 如果目标是特殊的句子结束标记，那么只需从词汇表中随机选择一个词即可。
-            if (target == 0) target = next_random % (vocab_size - 1) + 1;
+            // 获取 context word ，也就是说，获取单词的id(在词典中的索引)。
+            last_word = sen[c];
             
-            // 不要把正样本做负样本使用!
-            if (target == word) continue;
+            // 至此，我们已经确定了两个词
+            //   'word' - 在句子中当前位置的单词。(context window 的中心)
+            //   'last_word' - 位于 context window 内某个位置的词。
             
-            // 标记为负样本
-            label = 0;
+            // 验证词是否存在于词典中。
+            // 'word' - 在句子中当前位置的词(在上下文窗口的中心位置)。
+            // 'last_word' - 位于 context window 内某个位置的单词。
+            if (last_word == -1) continue;
+            
+            // 计算 'last_word' 的索引。
+            l1 = last_word * layer1_size;
+            
+            for (c = 0; c < layer1_size; c++) 
+                neu1e[c] = 0;
+            
+            // HIERARCHICAL SOFTMAX
+            if (hs) 
+                for (d = 0; d < vocab[word].codelen; d++) {
+                  f = 0;
+                  l2 = vocab[word].point[d] * layer1_size;
+                  // 前向传播 hidden -> ouput
+                  for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1[c + l2];
+                  if (f <= -MAX_EXP) continue;
+                  else if (f >= MAX_EXP) continue;
+                  else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
+                  // 'g' is the gradient multiplied by the learning rate
+                  g = (1 - vocab[word].code[d] - f) * alpha;
+                  // Propagate errors output -> hidden
+                  for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];
+                  // Learn weights hidden -> output
+                  for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * syn0[c + l1];
+                }
+            
+            // NEGATIVE SAMPLING
+            // 我们不会对词典中的每个词都执行反向传播，而是只对少数词执行反向传播
+            // (单词的数量由'negative'给出)。
+            // 这些单词是使用'unigram' 分布进行选择的，
+            // 该分布式在函数 InitUnigramTable 中生成的。
+            if (negative > 0) 
+                for (d = 0; d < negative + 1; d++) {
+                  // 第一次迭代我们去训练正样本。
+                  if (d == 0) {
+                    target = word;
+                    label = 1;
+                  // 其他的迭代训练负样本。
+                  } else {
+                    // 在能量表中随机抽取负样本，采样使得与target不同，label为0,
+                    // 也即最多采样 negative 个负样本。
+                    // 获取一个随机整数。
+                    next_random = next_random * (unsigned long long)25214903917 + 11;
+                    
+                    // 'target' 成为词汇中单词的索引，作为负样本使用。
+                    target = table[(next_random >> 16) % table_size];
+                    
+                    // 如果目标是特殊的句子结束标记，那么只需从词汇表中随机选择一个词即可。
+                    if (target == 0) target = next_random % (vocab_size - 1) + 1;
+                    
+                    // 不要把正样本做负样本使用!
+                    if (target == word) continue;
+                    
+                    // 标记为负样本
+                    label = 0;
+                  }
+                  
+                  // 获取 target word 在输出层的索引。
+                  l2 = target * layer1_size;
+                  
+                  // 此时，我们的两个单词由它们在layer中的索引表示。
+                  // l1 - 输入词在隐藏层中的索引。
+                  // l2 - 输出词在输出层中的索引。
+                  // label - 样本是正是负。
+                  
+                  // 计算 syn0 和 syn1neg 的内积。
+                  // 用循环计算。
+                  f = 0;
+                  for (c = 0; c < layer1_size; c++) 
+                    f += syn0[c + l1] * syn1neg[c + l2];
+                  
+                  // This block does two things:
+                  //   1. Calculates the output of the network for this training
+                  //      pair, using the expTable to evaluate the output layer
+                  //      activation function.
+                  //   2. Calculate the error at the output, stored in 'g', by
+                  //      subtracting the network output from the desired output,
+                  //      and finally multiply this by the learning rate.
+                  // 下面的代码在做两件事：
+                  //   1.
+                  //   2. 计算输出层的误差，并存在g中
+                  if (f > MAX_EXP) 
+                    g = (label - 1) * alpha;
+                  else if (f < -MAX_EXP) 
+                    g = (label - 0) * alpha;
+                  else 
+                    g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
+                  
+                  // Multiply the error by the output layer weights.
+                  // Accumulate these gradients over the negative samples and the one positive sample.
+                  // 
+                  for (c = 0; c < layer1_size; c++)
+                    neu1e[c] += g * syn1neg[c + l2];
+                  
+                  // Update the output layer weights by multiplying the output error
+                  // by the hidden layer weights.
+                  for (c = 0; c < layer1_size; c++) 
+                    syn1neg[c + l2] += g * syn0[c + l1];
+                }
+            // Once the hidden layer gradients for the negative samples plus the 
+            // one positive sample have been accumulated, update the hidden layer
+            // weights. 
+            // Note that we do not average the gradient before applying it.
+            for (c = 0; c < layer1_size; c++) 
+                syn0[c + l1] += neu1e[c];
           }
-          
-          // 获取 target word 在输出层的索引。
-          l2 = target * layer1_size;
-          
-          // At this point, our two words are represented by their index into
-          // the layer weights.
-          // l1 - The index of our input word within the hidden layer weights.
-          // l2 - The index of our output word within the output layer weights.
-          // label - Whether this is a positive (1) or negative (0) example.
-          
-          // Calculate the dot-product between the input words weights (in 
-          // syn0) and the output word's weights (in syn1neg).
-          // Note that this calculates the dot-product manually using a for
-          // loop over the vector elements!
-          f = 0;
-          for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
-          
-          // This block does two things:
-          //   1. Calculates the output of the network for this training
-          //  g rate.
-          if (f > MAX_EXP) g = (label - 1) * alpha;    pair, using the expTable to evaluate the output layer
-          //      activation function.
-          //   2. Calculate the error at the output, stored in 'g', by
-          //      subtracting the network output from the desired output, 
-          //      and finally multiply this by the learning rate.
-          if (f > MAX_EXP) g = (label - 1) * alpha;
-          else if (f < -MAX_EXP) g = (label - 0) * alpha;
-          else g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
-          
-          // Multiply the error by the output layer weights.
-          // Accumulate these gradients over the negative samples and the one
-          // positive sample.
-          for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
-          
-          // Update the output layer weights by multiplying the output error
-          // by the hidden layer weights.
-          for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1];
-        }
-        // Once the hidden layer gradients for the negative samples plus the 
-        // one positive sample have been accumulated, update the hidden layer
-        // weights. 
-        // Note that we do not average the gradient before applying it.
-        for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
-      }
     }
     
-    // Advance to the next word in the sentence.
+    // 遍历下一个单词。
     sentence_position++;
     
     // Check if we've reached the end of the sentence.
