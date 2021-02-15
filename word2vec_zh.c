@@ -484,14 +484,14 @@ void ReduceVocab()
 void CreateBinaryTree()
 {
   long long a, b, i, min1i, min2i, pos1, pos2, point[MAX_CODE_LENGTH];
-  char code[MAX_CODE_LENGTH]; // Default is 40
+  char code[MAX_CODE_LENGTH]; // 默认长度 40
 
-  // Note that calloc initializes these arrays to 0.
+  // calloc 将这些数组初始化为 0
   long long *count = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
   long long *binary = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
   long long *parent_node = (long long *)calloc(vocab_size * 2 + 1, sizeof(long long));
 
-  // The count array is twice the size of the vocabulary, plus one.
+  // count 数组是词典大小的两倍 + 1
   //   - The first half of `count` becomes a list of the word counts
   //     for each word in the vocabulary. We do not modify this part of the
   //     list.
@@ -499,25 +499,21 @@ void CreateBinaryTree()
   //     quadrillion). When we combine two trees under a word (e.g., word_id
   //     13), then we place the total weight of those subtrees into the word's
   //     position in the second half (e.g., count[vocab_size + 13]).
-  //
   for (a = 0; a < vocab_size; a++)
     count[a] = vocab[a].cn;
   for (a = vocab_size; a < vocab_size * 2; a++)
     count[a] = 1e15;
 
   // `pos1` and `pos2` are indeces into the `count` array.
-  //   - `pos1` starts at the middle of `count` (the end of the list of word
-  //     counts) and moves left.
-  //   - `pos2` starts at the beginning of the list of large integers and moves
-  //     right.
+  //   - `pos1` starts at the middle of `count` (the end of the list of word counts) and moves left.
+  //   - `pos2` starts at the beginning of the list of large integers and moves right.
   pos1 = vocab_size - 1;
   pos2 = vocab_size;
 
   /* ===============================
    *   Step 1: Create Huffman Tree
    * ===============================
-   * [Original Comment] Following algorithm constructs the Huffman tree by 
-   * adding one node at a time
+   * 下面的算法用于构建哈夫曼树，一次建立一个节点。
    * 
    * The Huffman coding algorithm starts with every node as its own tree, and
    * then combines the two smallest trees on each step. The weight of a tree is
@@ -539,9 +535,9 @@ void CreateBinaryTree()
   // minus 1.
   for (a = 0; a < vocab_size - 1; a++)
   {
-
-    // First, find two smallest nodes 'min1, min2'
-    // Find min1 (at index `min1i`)
+    // 首先，找到两个词频最小的节点 min1, min2
+    // min1
+    // min1i 表示词频最小节点(min1)的索引
     if (pos1 >= 0)
     {
       if (count[pos1] < count[pos2])
@@ -561,7 +557,8 @@ void CreateBinaryTree()
       pos2++;
     }
 
-    // Find min2 (at index `min2i`).
+    // 找到 min2
+    // min2i
     if (pos1 >= 0)
     {
       if (count[pos1] < count[pos2])
@@ -581,8 +578,7 @@ void CreateBinaryTree()
       pos2++;
     }
 
-    // Calculate the combined weight. We could be combining two words, a word
-    // and a tree, or two trees.
+    // 计算非叶子节点的权重，即两个子节点的和。
     count[vocab_size + a] = count[min1i] + count[min2i];
 
     // Store the path for working back up the tree.
@@ -590,10 +586,11 @@ void CreateBinaryTree()
     parent_node[min2i] = vocab_size + a;
 
     // binary[min1i] = 0; // This is implied.
-    // min1 is the (left?) node and is labeled '0', min2 is the (right?) node
-    // and is labeled '1'.
+    // min1 是左节点，标签为 0。
+    // min2 是右节点，标签为 1。
     binary[min2i] = 1;
-  }
+
+  } //
 
   /* ==========================================
    *    Step 2: Define Samples for Each Word
